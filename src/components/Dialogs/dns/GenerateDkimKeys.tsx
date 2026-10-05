@@ -6,7 +6,7 @@ import { makeStyles } from 'tss-react/mui';
 import { Button, CircularProgress, Dialog, DialogContent, DialogTitle, Divider, MenuItem, TextField, Theme, Typography } from '@mui/material';
 import { useTranslation } from 'react-i18next';
 import { copyToClipboard } from '../../../utils';
-import { Check, CopyAll, TaskAlt, WarningAmber } from '@mui/icons-material';
+import { Check, CopyAll, ErrorOutline, TaskAlt } from '@mui/icons-material';
 import { BaseDomain } from '../../../types/domains';
 import { createDkimKeypair } from '../../../actions/domains';
 import { useAppDispatch } from '../../../store';
@@ -31,13 +31,6 @@ const useStyles = makeStyles()((theme: Theme) => ({
     marginTop: 8,
     padding: 16,
   },
-  commands: {
-    background: theme.palette.mode === "light" ? "#fff" : "#000",
-    color: theme.palette.mode === "light" ? "#000" : "#fff",
-    fontSize: 16,
-    padding: 16,
-    borderRadius: 8,
-  }
 }));
 
 interface GenerateDkimKeysProps {
@@ -45,15 +38,6 @@ interface GenerateDkimKeysProps {
   onClose: () => void;
   domain: BaseDomain,
 }
-
-const commands = (domain: string) => `
-postconf -e 'non_smtpd_milters = $smtpd_milters'
-mkdir -m 0700 /var/lib/grommunio-antispam/dkim
-cp /var/lib/grommunio-admin-api/${domain}.dkim.key /var/lib/grommunio-antispam/dkim/
-chown -Rf groas:grommunio /var/lib/grommunio-antispam/dkim
-chmod 600 /var/lib/grommunio-antispam/dkim/${domain}.dkim.key
-systemctl restart postfix
-`;
 
 function GenerateDkimKeys({ open, onClose, domain }: GenerateDkimKeysProps) {
   const dispatch = useAppDispatch();
@@ -64,9 +48,10 @@ function GenerateDkimKeys({ open, onClose, domain }: GenerateDkimKeysProps) {
   const [mode, setMode] = useState("dns");
   const [selector, setSelector] = useState("");
   const [loading, setLoading] = useState(false);
+  const [dbStored, setDbStored] = useState(true);
   const [redisStored, setRedisStored] = useState(true);
+  const [redisError, setRedisError] = useState("");
   const [keyCopied, setKeyCopied] = useState(false);
-  const [commandsCopied, setCommandsCopied] = useState(false);
   const [snackbar, setSnackbar] = useState("");
 
   const handleKeygen = async () => {
@@ -74,27 +59,23 @@ function GenerateDkimKeys({ open, onClose, domain }: GenerateDkimKeysProps) {
     setLoading(true);
     const response = await dispatch(createDkimKeypair(domain.ID, { type, mode, selector: selector || undefined }))
       .catch((err) => setSnackbar(err));
-    // Newer backends return {pubKey, redisStored, redisError}; older ones
-    // return the bare public key and always require manual installation.
     setPubkey(typeof response === "string" ? response : (response?.pubKey ?? ""));
+    setDbStored(typeof response === "object" && response !== null ? Boolean(response.dbStored) : false);
     setRedisStored(typeof response === "object" && response !== null ? Boolean(response.redisStored) : false);
+    setRedisError(typeof response === "object" && response !== null && response.redisError ? String(response.redisError) : "");
     setLoading(false);
   }
 
-  const handleCopy = (type: string) => async () => {
+  const handleCopy = async () => {
     if(!pubKey) return;
-    const success = await copyToClipboard(type === "key" ? pubKey : commands(domain.domainname));
-    if(success) {
-      if(type === "key") setKeyCopied(true);
-      else setCommandsCopied(true);
-    }
+    const success = await copyToClipboard(pubKey);
+    if(success) setKeyCopied(true);
   }
 
   const handleClose = () => {
     onClose();
     setPubkey("");
     setKeyCopied(false);
-    setCommandsCopied(false);
     setLoading(false);
     setType("rsa");
     setSelector("");
@@ -154,7 +135,7 @@ function GenerateDkimKeys({ open, onClose, domain }: GenerateDkimKeysProps) {
           {pubKey}
         </pre>
         {!!pubKey && <Button
-          onClick={handleCopy("key")}
+          onClick={handleCopy}
           variant='contained'
           size='small'
           sx={{ mt: 2, mb: 2 }}
@@ -162,7 +143,7 @@ function GenerateDkimKeys({ open, onClose, domain }: GenerateDkimKeysProps) {
         >
           {t(keyCopied ? "Copied" : "Copy key")}
         </Button>}
-        {!!pubKey && redisStored && <div className={classes.manual}>
+        {!!pubKey && dbStored && redisStored && <div className={classes.manual}>
           <div className={classes.flexRow}>
             <TaskAlt color='success' sx={{ mr: 2 }}/>
             <Typography variant='h6'>
@@ -170,49 +151,21 @@ function GenerateDkimKeys({ open, onClose, domain }: GenerateDkimKeysProps) {
             </Typography>
           </div>
           <Typography sx={{ mb: 1 }}>
-            {t("The private key was pushed to the DKIM keystore and is used for signing automatically")}.
+            {t("The private key is stored in the server database and was pushed to the DKIM keystore; it is used for signing automatically")}.
           </Typography>
         </div>}
-        {!!pubKey && !redisStored && <div className={classes.manual}>
+        {!!pubKey && (!dbStored || !redisStored) && <div className={classes.manual}>
           <div className={classes.flexRow}>
-            <WarningAmber color='warning' sx={{ mr: 2 }}/>
-            <Typography variant='h6' color='warning'>
-              {t("Additional configuration required")}
+            <ErrorOutline color='error' sx={{ mr: 2 }}/>
+            <Typography variant='h6' color='error'>
+              {t("The key could not be stored completely")}
             </Typography>
           </div>
-          <Typography sx={{ mb: 1, fontWeight: "bold" }}>
-            {t("The private key has been generated on the server")}.{" "}
-            {t("Because the API could not store it in the DKIM keystore, you need to make additional changes on the server manually")}:
+          <Typography sx={{ mb: 1 }}>
+            {!dbStored
+              ? <>{t("The private key could not be saved in the server database")}. {t("Please check the server configuration and try again")}.</>
+              : <>{t("The private key is saved in the server database, but the DKIM keystore push failed")}{redisError ? `: ${redisError}` : ""}. {t("The server retries the push automatically every minute")}.</>}
           </Typography>
-          <div className={classes.commands}>
-            <pre>
-              postconf -e &apos;non_smtpd_milters = $smtpd_milters&apos;
-            </pre>
-            <pre>
-              mkdir -m 0700 /var/lib/grommunio-antispam/dkim
-            </pre>
-            <pre>
-              cp /var/lib/grommunio-admin-api/{domain.domainname}.dkim.key /var/lib/grommunio-antispam/dkim/
-            </pre>
-            <pre>
-              chown -Rf groas:grommunio /var/lib/grommunio-antispam/dkim
-            </pre>
-            <pre>
-              chmod 600 /var/lib/grommunio-antispam/dkim/{domain.domainname}.dkim.key
-            </pre>
-            <pre>
-              systemctl restart postfix
-            </pre>
-          </div>
-          <Button
-            onClick={handleCopy("commands")}
-            variant='contained'
-            size='small'
-            sx={{ mt: 2, mb: 2 }}
-            startIcon={commandsCopied ? <Check /> : <CopyAll />}
-          >
-            {t(commandsCopied ? "Copied" : "Copy commands")}
-          </Button>
         </div>}
       </DialogContent>
       <Feedback

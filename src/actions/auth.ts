@@ -61,6 +61,21 @@ export function authLoginWithToken(storedToken: string) {
   };
 }
 
+/**
+ * Login with the session cookie set by the API after single sign-on
+ */
+export function authLoginWithSession() {
+  return async (dispatch: Dispatch) => {
+    try {
+      const { grommunioAuthJwt: token, csrf } = await renewToken();
+      authenticate(dispatch, token, csrf);
+    } catch(err) {
+      clearStorage();
+      return Promise.reject(err);
+    }
+  };
+}
+
 async function authenticate(dispatch: Dispatch, token?: string, csrf?: string) {
   if(token) {
     setCookie(token);
@@ -100,7 +115,7 @@ export function authAuthenticated(authenticated = true, capabilities: string[]=[
   };
 }
 
-function authError(error: string) {
+export function authError(error: string) {
   return {
     type: AUTH_ERROR,
     error,
